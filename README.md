@@ -2,8 +2,8 @@
 
 # Simple TODO REST API (Go)
 
-A TODO application built with **Go lang** using `HttpServer`.  
-Supports basic CRUD operations with **in-memory storage** and **soft delete**.
+A simple TODO REST API written in **Go**, using `net/http` and **in-memory storage**.  
+It supports basic CRUD operations including **soft delete**.
 
 
 ## Features
