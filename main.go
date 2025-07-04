@@ -6,6 +6,7 @@ import (
     "net/http"
     "sync"
     "time"
+
     "github.com/google/uuid"
 )
 
@@ -27,24 +28,37 @@ var (
 func listTodos(w http.ResponseWriter, r *http.Request) {
     mu.Lock()
     defer mu.Unlock()
+
     var result []TodoItem
     for _, todo := range todos {
         if !todo.Deleted {
             result = append(result, *todo)
         }
     }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(result)
 }
 
 func createTodo(w http.ResponseWriter, r *http.Request) {
     var todo TodoItem
-    json.NewDecoder(r.Body).Decode(&todo)
+    err := json.NewDecoder(r.Body).Decode(&todo)
+    if err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
+
     todo.ID = uuid.New().String()
     todo.CreatedAt = time.Now()
     todo.UpdatedAt = time.Now()
+
     mu.Lock()
     todos[todo.ID] = &todo
     mu.Unlock()
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated) // 201 Created
     json.NewEncoder(w).Encode(todo)
 }
 
@@ -52,30 +66,44 @@ func getTodo(w http.ResponseWriter, r *http.Request) {
     id := r.URL.Path[len("/todos/"):]
     mu.Lock()
     defer mu.Unlock()
+
     todo, exists := todos[id]
     if !exists || todo.Deleted {
-        http.NotFound(w, r)
+        http.Error(w, "Todo not found", http.StatusNotFound)
         return
     }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(todo)
 }
 
 func updateTodo(w http.ResponseWriter, r *http.Request) {
     id := r.URL.Path[len("/todos/"):]
     var updated TodoItem
-    json.NewDecoder(r.Body).Decode(&updated)
+
+    err := json.NewDecoder(r.Body).Decode(&updated)
+    if err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
 
     mu.Lock()
     defer mu.Unlock()
+
     todo, exists := todos[id]
     if !exists || todo.Deleted {
-        http.NotFound(w, r)
+        http.Error(w, "Todo not found", http.StatusNotFound)
         return
     }
+
     todo.Title = updated.Title
     todo.Description = updated.Description
     todo.Completed = updated.Completed
     todo.UpdatedAt = time.Now()
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(todo)
 }
 
@@ -83,14 +111,17 @@ func deleteTodo(w http.ResponseWriter, r *http.Request) {
     id := r.URL.Path[len("/todos/"):]
     mu.Lock()
     defer mu.Unlock()
+
     todo, exists := todos[id]
     if !exists || todo.Deleted {
-        http.NotFound(w, r)
+        http.Error(w, "Todo not found", http.StatusNotFound)
         return
     }
+
     todo.Deleted = true
     todo.UpdatedAt = time.Now()
-    w.WriteHeader(http.StatusNoContent)
+
+    w.WriteHeader(http.StatusNoContent) // 204 No Content
 }
 
 func main() {
