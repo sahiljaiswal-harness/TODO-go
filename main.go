@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 type TodoItem struct {
@@ -25,6 +26,11 @@ type TodoItem struct {
 
 var db *pgx.Conn
 
+var (
+	ctx = context.Background()
+	RDB *redis.Client
+)
+
 func main() {
 	var err error
 	db, err = pgx.Connect(context.Background(), os.Getenv("POSTGRES_URI"))
@@ -33,11 +39,25 @@ func main() {
 	}
 	defer db.Close(context.Background())
 
+	InitRedis()
 	http.HandleFunc("/todos", todosHandler)
 	http.HandleFunc("/todos/", todoHandler)
 
 	fmt.Println("Server running on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func InitRedis() {
+	RDB = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // default DB
+	})
+	_, err := RDB.Ping(ctx).Result()
+	if err != nil {
+		fmt.Printf("Unable to connect to Redis: %v", err)
+	}
+	fmt.Println("Connected to Redis")
 }
 
 func todosHandler(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +92,21 @@ func todoHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getAllTodos(w http.ResponseWriter, r *http.Request) {
+
+	
+	cacheKey := "todos:list"
+	cached, err := RDB.Get(ctx, cacheKey).Result()
+	if err == nil {
+		fmt.Println("serving from cache")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, writeErr := w.Write([]byte(cached)); writeErr != nil {
+			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+			return
+		}
+		return
+	}
+
 	rows, err := db.Query(context.Background(), "SELECT id, title, description, completed, deleted, created_at, updated_at FROM todos WHERE deleted = false")
 	if err != nil {
 		http.Error(w, "DB error", http.StatusInternalServerError)
@@ -89,6 +124,9 @@ func getAllTodos(w http.ResponseWriter, r *http.Request) {
 		}
 		todos = append(todos, t)
 	}
+
+	jsonData, _ := json.Marshal(todos)
+	RDB.Set(ctx, cacheKey, jsonData, 0)
 
 	respondJSON(w, http.StatusOK, todos)
 }
@@ -115,12 +153,24 @@ func createTodo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Invalidate cache
+	RDB.Del(ctx, "todos:list")
+
 	respondJSON(w, http.StatusCreated, t)
 }
 
 func getTodoByID(w http.ResponseWriter, id uuid.UUID) {
+	cacheKey := "todos:item:" + id.String()
+	cached, err := RDB.Get(ctx, cacheKey).Result()
+	if err == nil {
+		fmt.Println("serving todo from cache")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(cached))
+		return
+	}
+
 	var t TodoItem
-	err := db.QueryRow(context.Background(), `
+	err = db.QueryRow(context.Background(), `
         SELECT id, title, description, completed, deleted, created_at, updated_at
         FROM todos WHERE id = $1 AND deleted = false
     `, id).Scan(&t.ID, &t.Title, &t.Description, &t.Completed, &t.Deleted, &t.CreatedAt, &t.UpdatedAt)
@@ -129,6 +179,9 @@ func getTodoByID(w http.ResponseWriter, id uuid.UUID) {
 		http.Error(w, "Todo not found", http.StatusNotFound)
 		return
 	}
+
+	jsonData, _ := json.Marshal(t)
+	RDB.Set(ctx, cacheKey, jsonData, 0)
 
 	respondJSON(w, http.StatusOK, t)
 }
@@ -162,6 +215,10 @@ func updateTodo(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
 		return
 	}
 
+	// Invalidate cache for list and this item
+	RDB.Del(ctx, "todos:list")
+	RDB.Del(ctx, "todos:item:"+id.String())
+
 	respondJSON(w, http.StatusOK, t)
 }
 
@@ -174,6 +231,10 @@ func softDeleteTodo(w http.ResponseWriter, id uuid.UUID) {
 		http.Error(w, "Delete failed or not found", http.StatusNotFound)
 		return
 	}
+
+	// Invalidate cache for list and this item
+	RDB.Del(ctx, "todos:list")
+	RDB.Del(ctx, "todos:item:"+id.String())
 
 	respondJSON(w, http.StatusNoContent, nil) // 204 No Content
 }
